@@ -1,60 +1,78 @@
+import pickle
 import cv2
+import mediapipe as mp
 import numpy as np
 
-# Initialize background subtractor
-backSub = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=50, detectShadows=True)
+# Load the model from a pickle file
+with open('model.pkl', 'rb') as f:
+    model_dict = pickle.load(f)
+model = model_dict['model']
 
-def detect_hand(frame):
-    # Apply background subtraction
-    fgMask = backSub.apply(frame)
+# Initialize MediaPipe Hands
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(
+    static_image_mode=False,  # Better for video stream
+    max_num_hands=2,          # Can adjust based on use-case
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
+mp_drawing = mp.solutions.drawing_utils
+mp_drawing_styles = mp.solutions.drawing_styles
 
-    # Edge detection
-    edges = cv2.Canny(fgMask, 100, 200)
-
-    # Find contours from edges
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    # Filter contours based on shape properties
-    valid_contours = []
-    for contour in contours:
-        area = cv2.contourArea(contour)
-        if area > 1000:  # Minimum area to consider
-            hull = cv2.convexHull(contour)
-            hull_area = cv2.contourArea(hull)
-            if hull_area > 0:
-                solidity = float(area) / hull_area
-                if solidity > 0.8:  # Solidity check to filter out non-solid shapes
-                    valid_contours.append(contour)
-
-    # Find the largest valid contour as the hand
-    if valid_contours:
-        hand_contour = max(valid_contours, key=cv2.contourArea)
-        return hand_contour, edges
-
-    return None, edges
-
-# Open camera
-cap = cv2.VideoCapture(0)
-if not cap.isOpened():
-    print("Error: Could not open camera.")
-    exit()
+# Start capturing video
+cv2.namedWindow("Frame")
+vc = cv2.VideoCapture(0)
 
 while True:
-    ret, frame = cap.read()
+    ret, frame = vc.read()
     if not ret:
-        print("Error: Failed to capture frame.")
+        print("Failed to capture video frame")
         break
 
-    hand_contour, edge_view = detect_hand(frame)
-    if hand_contour is not None:
-        # Draw the contour on the frame
-        cv2.drawContours(frame, [hand_contour], -1, (255, 0, 0), 2)
+    # Correct unpacking of frame dimensions
+    H, W, _ = frame.shape
 
-    cv2.imshow('Camera Feed', frame)
-    cv2.imshow('Edges', edge_view)
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    result = hands.process(frame_rgb)
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    if result.multi_hand_landmarks:
+        for hand_landmarks in result.multi_hand_landmarks:
+            # Draw hand landmarks on the original frame
+            mp_drawing.draw_landmarks(
+                frame,
+                hand_landmarks,
+                mp_hands.HAND_CONNECTIONS,
+                mp_drawing_styles.get_default_hand_landmarks_style(),
+                mp_drawing_styles.get_default_hand_connections_style()
+            )
+
+            # Prepare data for prediction
+            data_aux = []
+            x_ = []
+            y_ = []
+
+            for landmark in hand_landmarks.landmark:
+                data_aux.extend([landmark.x, landmark.y])  # Flatten the data into a single list
+                x_.append(landmark.x)
+                y_.append(landmark.y)
+
+            # Calculate bounding box coordinates and ensure integers
+            x1, y1 = int(min(x_) * W), int(min(y_) * H)
+            x2, y2 = int(max(x_) * W), int(max(y_) * H)
+
+            # Ensure data is in the correct shape for prediction: 1 sample x number of features
+            data_aux = np.array([data_aux])  # Wrap in an additional list to create a 2D array
+            prediction = model.predict(data_aux)
+            prediction_text = f'Prediction: {prediction[0]}'
+
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(frame, prediction_text, (x1, y2 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2, cv2.LINE_AA)
+
+    # Display the frame
+    cv2.imshow("Frame", frame)
+    if cv2.waitKey(25) & 0xFF == ord('q'):
         break
 
-cap.release()
+# Cleanup
+vc.release()
 cv2.destroyAllWindows()
